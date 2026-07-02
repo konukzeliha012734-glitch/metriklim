@@ -9,6 +9,8 @@ bir uygulamadır. Sabit yüzölçümü sınırı yoktur.
 - Tek dosya GeoPackage, GeoJSON ve SHP yükleme
 - Tam Shapefile paketi veya ZIP desteği
 - Kullanıcıya ait Google Earth Engine projesiyle çalışma
+- Project ID yardım ekranı ve oturuma özel Google Earth Engine yetkilendirmesi
+- Kullanıcıya ait Climate Engine API anahtarını doğrulama ve poligon zaman serisi
 - CHIRPS yağışı ve ERA5-Land sıcaklığı
 - SPI-1/3/6/12 ve kullanıcı seçimli diğer ölçekler
 - Sentinel-2 tabanlı NDVI, NDWI, NDMI, NDBI, EVI ve SAVI

@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 import requests
+from google.oauth2.credentials import Credentials
 from dateutil.relativedelta import relativedelta
 from rasterio.io import MemoryFile
 from rasterio.features import geometry_mask
@@ -100,11 +101,79 @@ def project_id(explicit_project: str | None = None) -> str | None:
     return explicit_project or os.getenv("GOOGLE_EARTH_ENGINE_PROJECT")
 
 
+def create_user_auth_flow() -> tuple[str, str]:
+    """Earth Engine'in resmi uzak/notebook OAuth akışını başlatır."""
+    flow = ee.oauth.Flow("notebook")
+    return flow.auth_url, flow.code_verifier
+
+
+def exchange_user_auth_code(
+    auth_code: str,
+    code_verifier: str,
+    project: str,
+) -> dict[str, object]:
+    """Tek kullanımlık kodu oturuma özel Earth Engine kimliğine dönüştürür."""
+    request_id, pkce_verifier, client_verifier = code_verifier.split(":")
+    response = requests.post(
+        ee.oauth.FETCH_URL,
+        json={"request_id": request_id, "client_verifier": client_verifier},
+        timeout=60,
+    )
+    response.raise_for_status()
+    client_info = response.json()
+    if "error" in client_info:
+        raise RuntimeError(f"Google yetkilendirme hatası: {client_info['error']}")
+    refresh_token = ee.oauth.request_token(
+        auth_code.strip(),
+        pkce_verifier,
+        client_id=client_info["client_id"],
+        client_secret=client_info["client_secret"],
+    )
+    auth_data = {
+        "project": project,
+        "refresh_token": refresh_token,
+        "client_id": client_info["client_id"],
+        "client_secret": client_info["client_secret"],
+        "scopes": client_info.get("scopes") or ee.oauth.SCOPES,
+    }
+    credentials = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri=ee.oauth.TOKEN_URI,
+        client_id=str(auth_data["client_id"]),
+        client_secret=str(auth_data["client_secret"]),
+        scopes=list(auth_data["scopes"]),
+    )
+    ee.Initialize(credentials=credentials, project=project)
+    ee.Number(1).getInfo()
+    return auth_data
+
+
 def initialize_gee(project: str | None = None) -> tuple[bool, str]:
     selected_project = project_id(project)
     if not selected_project:
         return False, "Google Earth Engine Project ID girilmedi."
     try:
+        user_auth = None
+        try:
+            import streamlit as st
+
+            candidate = st.session_state.get("gee_user_auth")
+            if candidate and candidate.get("project") == selected_project:
+                user_auth = candidate
+        except Exception:
+            pass
+        if user_auth:
+            credentials = Credentials(
+                token=None,
+                refresh_token=user_auth["refresh_token"],
+                token_uri=ee.oauth.TOKEN_URI,
+                client_id=user_auth["client_id"],
+                client_secret=user_auth["client_secret"],
+                scopes=user_auth["scopes"],
+            )
+            ee.Initialize(credentials=credentials, project=selected_project)
+            return True, f"Bağlı · {selected_project} · kişisel Google oturumu"
         service_account = os.getenv("GEE_SERVICE_ACCOUNT", "").strip()
         private_key = os.getenv("GEE_PRIVATE_KEY", "").replace("\\n", "\n").strip()
         if not service_account or not private_key:

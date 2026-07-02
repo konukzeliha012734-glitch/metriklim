@@ -4,6 +4,7 @@ from datetime import date, time
 import json
 import os
 from pathlib import Path
+import re
 
 import folium
 import streamlit as st
@@ -19,7 +20,11 @@ from metriklim.artifacts import (
     dataframe_to_csv,
     geodata_to_gpkg,
 )
-from metriklim.climate_engine import connection_label
+from metriklim.climate_engine import (
+    connection_label,
+    fetch_timeseries as fetch_climate_engine_timeseries,
+    validate_api_key,
+)
 from metriklim.exports import build_metadata
 from metriklim.geometry import GeometryUploadError, UploadedPart, inspect_uploaded_files
 from metriklim.gee import (
@@ -28,6 +33,8 @@ from metriklim.gee import (
     build_remote_analysis_geotiff,
     fetch_chirps_monthly_mean,
     fetch_gee_monthly_climate,
+    create_user_auth_flow,
+    exchange_user_auth_code,
     initialize_gee,
 )
 from metriklim.open_meteo import fetch_centroid_series
@@ -58,7 +65,6 @@ if access_code and not st.session_state.get("access_granted"):
     st.stop()
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def cached_gee_status(project: str | None) -> tuple[bool, str]:
     return initialize_gee(project)
 
@@ -272,6 +278,10 @@ with tab_data:
         unsafe_allow_html=True,
     )
     c1, c2, c3 = st.columns(3, gap="large")
+    climate_engine_key = st.session_state.get(
+        "climate_engine_api_key",
+        os.getenv("CLIMATE_ENGINE_API_KEY", ""),
+    )
     with c1:
         source_options = list(SOURCES)
         provider = st.selectbox(
@@ -284,39 +294,200 @@ with tab_data:
         status_class = "status-ready" if source_info["status"] in {"Hazır", "Açık erişim"} else "status-wait"
         st.markdown(f'<span class="{status_class}">● {source_info["status"]}</span>', unsafe_allow_html=True)
         if provider == "Climate Engine":
-            st.caption(f"Bağlantı: {connection_label()}")
+            st.markdown("##### Climate Engine hesabını bağlayın")
+            st.caption(
+                "Climate Engine kullanıcı girişi Project ID ile değil, kişiye özel API anahtarıyla yapılır."
+            )
+            entered_ce_key = st.text_input(
+                "Climate Engine API anahtarı",
+                value="",
+                type="password",
+                placeholder="Anahtarınızı buraya yapıştırın",
+                help="Anahtar yalnız bu tarayıcı oturumunda tutulur; GitHub'a ve çıktı dosyalarına yazılmaz.",
+            )
+            ce_left, ce_right = st.columns(2)
+            ce_left.link_button(
+                "API anahtarı iste",
+                "https://www.climateengine.org/apis/requesting-an-authorization-key-token/",
+                use_container_width=True,
+            )
+            ce_right.link_button(
+                "Resmî API belgeleri",
+                "https://api.climateengine.org/",
+                use_container_width=True,
+            )
+            if st.button(
+                "Climate Engine bağlantısını doğrula",
+                disabled=not entered_ce_key,
+                use_container_width=True,
+            ):
+                try:
+                    with st.spinner("Climate Engine anahtarı doğrulanıyor..."):
+                        ce_status = validate_api_key(entered_ce_key)
+                    st.session_state.climate_engine_api_key = entered_ce_key
+                    st.session_state.climate_engine_status = ce_status
+                    st.success("Climate Engine API anahtarı doğrulandı.")
+                    st.rerun()
+                except Exception as ce_error:
+                    st.session_state.pop("climate_engine_api_key", None)
+                    st.session_state.pop("climate_engine_status", None)
+                    st.error(f"Climate Engine bağlantısı kurulamadı: {ce_error}")
+            climate_engine_key = st.session_state.get(
+                "climate_engine_api_key",
+                os.getenv("CLIMATE_ENGINE_API_KEY", ""),
+            )
+            if climate_engine_key:
+                st.success(f"Climate Engine · {connection_label(climate_engine_key)}")
+                expiration = st.session_state.get("climate_engine_status", {}).get("expiration")
+                if expiration:
+                    st.caption(f"Anahtar geçerlilik bilgisi: {expiration}")
+                if st.button("Climate Engine bağlantısını kes", use_container_width=True):
+                    st.session_state.pop("climate_engine_api_key", None)
+                    st.session_state.pop("climate_engine_status", None)
+                    st.rerun()
         gee_project = (
             st.text_input(
-                "GEE Project ID",
+                "Google Earth Engine Project ID",
                 value=os.getenv("GOOGLE_EARTH_ENGINE_PROJECT", ""),
-                placeholder="ör. my-earth-engine-project",
-                help="Her kullanıcı kendi kayıtlı Google Earth Engine projesini kullanır.",
+                placeholder="ör. ee-kullanici-projesi",
+                help="Proje adı veya numarası değil, Google Cloud Project ID değerini girin.",
             )
             if provider == "Google Earth Engine"
             else os.getenv("GOOGLE_EARTH_ENGINE_PROJECT", "")
         )
         if provider == "Google Earth Engine":
-            gee_ok, gee_message = cached_gee_status(gee_project or None)
-            if gee_ok:
-                st.success(f"Earth Engine {gee_message}")
-            else:
-                st.warning("Earth Engine kullanıcı doğrulaması bekleniyor.")
-                if gee_project:
+            project_valid = bool(
+                re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", gee_project or "")
+            )
+            with st.expander("Project ID nasıl alınır?", expanded=not project_valid):
+                st.markdown(
+                    """
+                    1. Google Cloud'da bir proje oluşturun veya mevcut projenizi seçin.
+                    2. **Project ID** değerini proje seçiciden kopyalayın; proje adı ve proje numarası farklıdır.
+                    3. Earth Engine API'yi etkinleştirin.
+                    4. Projeyi ticari olmayan araştırma veya uygun kullanım türüyle Earth Engine'e kaydedin.
+                    5. Buraya Project ID'yi girip Google hesabınızla yetkilendirin.
+                    """
+                )
+                st.link_button(
+                    "1 · Google Cloud projesi oluştur",
+                    "https://console.cloud.google.com/projectcreate",
+                    use_container_width=True,
+                )
+                if project_valid:
                     st.link_button(
-                        "GEE projesini noncommercial araştırma için kaydet",
-                        (
-                            "https://console.cloud.google.com/earth-engine/configuration"
-                            f"?project={gee_project}"
-                        ),
+                        "2 · Earth Engine API'yi etkinleştir",
+                        "https://console.cloud.google.com/apis/library/earthengine.googleapis.com"
+                        f"?project={gee_project}",
                         use_container_width=True,
                     )
-                st.code(
-                    rf'.\.venv\Scripts\python.exe gee_auth.py --project "{gee_project or "PROJECT_ID"}"',
-                    language="powershell",
+                    st.link_button(
+                        "3 · Projeyi Earth Engine'e kaydet",
+                        "https://console.cloud.google.com/earth-engine/configuration"
+                        f"?project={gee_project}",
+                        use_container_width=True,
+                    )
+                    st.caption(
+                        "Kayıt sayfasına yönlendirilmeniz normaldir; bu adım Google girişi değil, "
+                        "Project ID'nin Earth Engine kullanımına açılmasıdır."
+                    )
+
+            if gee_project and not project_valid:
+                st.error(
+                    "Project ID biçimi geçerli görünmüyor. Yalnızca küçük harf, rakam ve kısa çizgi kullanın."
                 )
-                st.caption("Bu komut yalnızca ilk bağlantıda Google giriş penceresini açar.")
+                gee_ok, gee_message = False, "Geçersiz Project ID"
+            elif project_valid:
+                gee_ok, gee_message = cached_gee_status(gee_project)
+                personal_auth = st.session_state.get("gee_user_auth", {})
+                personally_connected = personal_auth.get("project") == gee_project
+                if gee_ok and personally_connected:
+                    st.success(f"Earth Engine {gee_message}")
+                    if st.button("Google bağlantısını kes", use_container_width=True):
+                        st.session_state.pop("gee_user_auth", None)
+                        st.session_state.pop("gee_auth_flow", None)
+                        st.rerun()
+                elif gee_ok:
+                    st.success(f"Earth Engine {gee_message}")
+                    st.caption("Sunucu bağlantısı hazır. İsterseniz kendi Google hesabınızı bağlayabilirsiniz.")
+                else:
+                    st.warning("Bu Project ID için geçerli Google yetkilendirmesi bulunamadı.")
+
+                if not personally_connected:
+                    if st.button(
+                        "Google hesabıyla Earth Engine'e bağlan",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        auth_url, verifier = create_user_auth_flow()
+                        st.session_state.gee_auth_flow = {
+                            "project": gee_project,
+                            "url": auth_url,
+                            "verifier": verifier,
+                        }
+                    auth_flow = st.session_state.get("gee_auth_flow")
+                    if auth_flow and auth_flow.get("project") == gee_project:
+                        st.link_button(
+                            "Google giriş ve izin ekranını aç",
+                            auth_flow["url"],
+                            use_container_width=True,
+                        )
+                        auth_code = st.text_input(
+                            "Google'ın verdiği tek kullanımlık doğrulama kodu",
+                            type="password",
+                            help="Kod yalnızca bu oturumda bağlantı kurmak için kullanılır ve dosyaya yazılmaz.",
+                        )
+                        if st.button(
+                            "Bağlantıyı tamamla ve test et",
+                            disabled=not auth_code,
+                            use_container_width=True,
+                        ):
+                            try:
+                                with st.spinner("Google Earth Engine bağlantısı doğrulanıyor..."):
+                                    st.session_state.gee_user_auth = exchange_user_auth_code(
+                                        auth_code,
+                                        auth_flow["verifier"],
+                                        gee_project,
+                                    )
+                                st.session_state.pop("gee_auth_flow", None)
+                                st.success("Google hesabı ve Project ID başarıyla doğrulandı.")
+                                st.rerun()
+                            except Exception as auth_error:
+                                st.error(
+                                    "Bağlantı kurulamadı. Project ID, Earth Engine kaydı ve Google "
+                                    f"hesabı izinlerini kontrol edin. Ayrıntı: {auth_error}"
+                                )
+            else:
+                gee_ok, gee_message = False, "Project ID bekleniyor"
+                st.info("Önce kendi Google Cloud Project ID değerinizi girin.")
     with c2:
         product = st.selectbox("Veri ürünü", source_info["products"])
+        ce_dataset_defaults = {
+            "CHIRPS Daily": ("CHIRPS_DAILY", "precipitation"),
+            "CHIRPS Pentad": ("CHIRPS_PENTAD", "precipitation"),
+            "ERA5": ("ERA5", ""),
+            "ERA5-Land": ("ERA5_LAND", ""),
+        }
+        if provider == "Climate Engine":
+            default_dataset, default_variables = ce_dataset_defaults.get(product, (product, ""))
+            ce_dataset_id = st.text_input(
+                "Climate Engine dataset parametresi",
+                value=default_dataset,
+                help="Resmî Climate Engine Datasets & Variables sayfasındaki Dataset Parameter değeri.",
+            )
+            ce_variable_ids = st.text_input(
+                "Climate Engine değişken parametreleri",
+                value=default_variables,
+                placeholder="ör. precipitation veya NDVI, EVI",
+                help="Birden fazla değişkeni virgülle ayırabilirsiniz.",
+            )
+            st.link_button(
+                "Dataset ve değişken parametrelerini incele",
+                "https://www.climateengine.org/apis/apiDatasets/",
+                use_container_width=True,
+            )
+        else:
+            ce_dataset_id, ce_variable_ids = "", ""
         variables = st.multiselect(
             "Değişkenler",
             list(VARIABLES),
@@ -553,13 +724,23 @@ with tab_output:
         default=["Analiz sonuçları", "Kaynak ve yöntem metadata", "Kalite kontrol raporu"],
     )
 
-    can_build = bool(summary and variables and selected_analyses and start_date <= end_date)
+    source_ready = (
+        bool(climate_engine_key and ce_dataset_id and ce_variable_ids)
+        if provider == "Climate Engine"
+        else True
+    )
+    can_build = bool(
+        summary and variables and selected_analyses and start_date <= end_date and source_ready
+    )
     if not summary:
         st.warning("Önce Alan sekmesinden geçerli bir çalışma alanı yükleyin.")
     if not selected_analyses:
         st.warning("Analiz sekmesinden en az bir yöntem seçin.")
-    if provider == "Climate Engine" and connection_label() != "Bağlı":
-        st.info("Climate Engine canlı verisi için API anahtarı gerekir; proje paketi yine de oluşturulabilir.")
+    if provider == "Climate Engine" and not source_ready:
+        st.warning(
+            "Climate Engine işlemi için doğrulanmış API anahtarı, dataset parametresi "
+            "ve en az bir değişken parametresi gereklidir."
+        )
 
     if st.button(
         "İşlemi oluştur",
@@ -572,6 +753,7 @@ with tab_output:
             "Otomatik en uygun açık kaynak",
             "Open-Meteo Historical",
             "Google Earth Engine",
+            "Climate Engine",
         }
         if not live_supported:
             st.error(
@@ -581,7 +763,7 @@ with tab_output:
             )
         else:
             try:
-                with st.spinner("ERA5-Land iklim verisi indiriliyor ve çıktılar hazırlanıyor..."):
+                with st.spinner("Seçilen kaynaktan gerçek veri indiriliyor ve çıktılar hazırlanıyor..."):
                     if provider == "Google Earth Engine":
                         if "SPI" in selected_analyses and "Yağış" not in variables:
                             raise ValueError(
@@ -624,6 +806,23 @@ with tab_output:
                                 climate_model += " + ERA5 fallback (Open-Meteo)"
                             except ValueError:
                                 pass
+                    elif provider == "Climate Engine":
+                        climate_data, ce_metadata = fetch_climate_engine_timeseries(
+                            climate_engine_key,
+                            summary.gdf_wgs84,
+                            start_date,
+                            end_date,
+                            ce_dataset_id,
+                            ce_variable_ids,
+                            area_reducer="mean",
+                        )
+                        climate_model = (
+                            f"Climate Engine API · {ce_dataset_id} · {ce_variable_ids}"
+                        )
+                        climate_url = ce_metadata["endpoint"]
+                        climate_latitude, climate_longitude = summary.centroid
+                        climate_elevation = None
+                        unsupported = []
                     else:
                         climate = fetch_centroid_series(
                             latitude=summary.centroid[0],
