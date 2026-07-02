@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+from datetime import timedelta
 from typing import Any
 
 import geopandas as gpd
@@ -76,40 +77,89 @@ def fetch_timeseries(
             .iloc[0]
         )
         coordinates = json.dumps(candidate.__geo_interface__["coordinates"])
-    payload = {
-        "coordinates": coordinates,
-        "area_reducer": area_reducer,
-        "dataset": dataset.strip(),
-        "variable": variables.strip(),
-        "start_date": str(start_date),
-        "end_date": str(end_date),
-    }
-    response = requests.post(
-        f"{BASE_URL}/timeseries/native/coordinates",
-        headers={"Authorization": api_key.strip()},
-        json=payload,
-        timeout=300,
-    )
-    if response.status_code in {401, 403}:
-        raise ValueError("Climate Engine anahtarı geçersiz, süresi dolmuş veya kotası yetersiz.")
-    if not response.ok:
-        try:
-            error_detail = response.json()
-        except ValueError:
-            error_detail = response.text.strip()
-        raise RuntimeError(
-            f"Climate Engine isteği başarısız (HTTP {response.status_code}). "
-            f"Dataset={dataset}, değişken={variables}, dönem={start_date}/{end_date}, "
-            f"geometri={len(coordinates):,} karakter, sadeleştirme={tolerance} m. "
-            f"Servis yanıtı: {str(error_detail)[:1200]}"
+    endpoint = f"{BASE_URL}/timeseries/native/coordinates"
+    headers = {"Authorization": api_key.strip()}
+
+    def request_period(period_start, period_end) -> tuple[list[dict], dict[str, Any]]:
+        payload = {
+            "coordinates": coordinates,
+            "area_reducer": area_reducer,
+            "dataset": dataset.strip(),
+            "variable": variables.strip(),
+            "start_date": str(period_start),
+            "end_date": str(period_end),
+        }
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=300)
+        if response.status_code in {401, 403}:
+            raise ValueError(
+                "Climate Engine anahtarı geçersiz, süresi dolmuş veya kotası yetersiz."
+            )
+        if not response.ok:
+            try:
+                error_detail = response.json()
+            except ValueError:
+                error_detail = response.text.strip()
+            error_text = str(error_detail)
+            span_days = (period_end - period_start).days
+            if (
+                response.status_code >= 500
+                and "Response size exceeds limit" in error_text
+                and span_days > 31
+            ):
+                midpoint = period_start + timedelta(days=span_days // 2)
+                left_records, left_meta = request_period(period_start, midpoint)
+                right_records, right_meta = request_period(
+                    midpoint + timedelta(days=1), period_end
+                )
+                return left_records + right_records, {
+                    "split": True,
+                    "parts": [left_meta, right_meta],
+                }
+            raise RuntimeError(
+                f"Climate Engine isteği başarısız (HTTP {response.status_code}). "
+                f"Dataset={dataset}, değişken={variables}, dönem={period_start}/{period_end}, "
+                f"geometri={len(coordinates):,} karakter, sadeleştirme={tolerance} m. "
+                f"Servis yanıtı: {error_text[:1200]}"
+            )
+        body = response.json()
+        series_groups = body.get("Data")
+        if not series_groups:
+            return [], {
+                key: value for key, value in body.items() if key != "Data"
+            }
+        first_group = series_groups[0] if isinstance(series_groups, list) else series_groups
+        records = first_group.get("Data") if isinstance(first_group, dict) else first_group
+        if isinstance(records, dict):
+            normalized_records = pd.DataFrame.from_dict(records).to_dict("records")
+        else:
+            normalized_records = list(records or [])
+        return normalized_records, {
+            key: value for key, value in body.items() if key != "Data"
+        }
+
+    requested_start = pd.Timestamp(start_date).date()
+    requested_end = pd.Timestamp(end_date).date()
+    all_records: list[dict] = []
+    chunk_metadata = []
+    chunk_start = requested_start
+    while chunk_start <= requested_end:
+        chunk_end = min(
+            (pd.Timestamp(chunk_start) + pd.DateOffset(years=5) - pd.Timedelta(days=1)).date(),
+            requested_end,
         )
-    body = response.json()
-    series_groups = body.get("Data")
-    if not series_groups:
-        raise ValueError("Climate Engine seçilen alan ve dönem için veri döndürmedi.")
-    first_group = series_groups[0] if isinstance(series_groups, list) else series_groups
-    records = first_group.get("Data") if isinstance(first_group, dict) else first_group
-    data = pd.DataFrame.from_dict(records)
+        records, response_metadata = request_period(chunk_start, chunk_end)
+        all_records.extend(records)
+        chunk_metadata.append(
+            {
+                "start": str(chunk_start),
+                "end": str(chunk_end),
+                "record_count": len(records),
+                "metadata": response_metadata,
+            }
+        )
+        chunk_start = chunk_end + timedelta(days=1)
+
+    data = pd.DataFrame.from_dict(all_records)
     if data.empty:
         raise ValueError("Climate Engine yanıtındaki zaman serisi boş.")
     date_column = next(
@@ -128,12 +178,10 @@ def fetch_timeseries(
     if "precipitation" in data.columns:
         data = data.rename(columns={"precipitation": "Toplam yağış (mm)"})
     metadata = {
-        "endpoint": f"{BASE_URL}/timeseries/native/coordinates",
+        "endpoint": endpoint,
         "dataset": dataset,
         "variables": variables,
         "area_reducer": area_reducer,
-        "response_metadata": {
-            key: value for key, value in body.items() if key != "Data"
-        },
+        "request_chunks": chunk_metadata,
     }
     return data, metadata
