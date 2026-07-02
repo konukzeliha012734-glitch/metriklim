@@ -63,15 +63,19 @@ def fetch_timeseries(
     """Yüklenen alan için Climate Engine native zaman serisini getirir."""
     wgs84 = gdf.to_crs(4326)
     metric_crs = wgs84.estimate_utm_crs() or "EPSG:6933"
-    simplified = (
-        wgs84[["geometry"]]
-        .dissolve()
-        .to_crs(metric_crs)
-        .simplify(100, preserve_topology=True)
-        .to_crs(4326)
-        .iloc[0]
-    )
-    coordinates = json.dumps(simplified.__geo_interface__["coordinates"])
+    metric_geometry = wgs84[["geometry"]].dissolve().to_crs(metric_crs)
+    tolerance = 100
+    simplified = metric_geometry.simplify(tolerance, preserve_topology=True)
+    candidate = simplified.to_crs(4326).iloc[0]
+    coordinates = json.dumps(candidate.__geo_interface__["coordinates"])
+    while len(coordinates) > 80_000 and tolerance < 10_000:
+        tolerance *= 2
+        candidate = (
+            metric_geometry.simplify(tolerance, preserve_topology=True)
+            .to_crs(4326)
+            .iloc[0]
+        )
+        coordinates = json.dumps(candidate.__geo_interface__["coordinates"])
     payload = {
         "coordinates": coordinates,
         "area_reducer": area_reducer,
@@ -88,7 +92,17 @@ def fetch_timeseries(
     )
     if response.status_code in {401, 403}:
         raise ValueError("Climate Engine anahtarı geçersiz, süresi dolmuş veya kotası yetersiz.")
-    response.raise_for_status()
+    if not response.ok:
+        try:
+            error_detail = response.json()
+        except ValueError:
+            error_detail = response.text.strip()
+        raise RuntimeError(
+            f"Climate Engine isteği başarısız (HTTP {response.status_code}). "
+            f"Dataset={dataset}, değişken={variables}, dönem={start_date}/{end_date}, "
+            f"geometri={len(coordinates):,} karakter, sadeleştirme={tolerance} m. "
+            f"Servis yanıtı: {str(error_detail)[:1200]}"
+        )
     body = response.json()
     series_groups = body.get("Data")
     if not series_groups:

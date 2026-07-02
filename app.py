@@ -522,7 +522,11 @@ with tab_data:
                 step=1,
             )
             start_date = date(int(start_year), 1, 1)
-            end_date = date(int(end_year), 12, 31)
+            end_date = (
+                date.today()
+                if int(end_year) == date.today().year
+                else date(int(end_year), 12, 31)
+            )
             st.caption(f"Uygulanacak dönem: {start_date:%d.%m.%Y} – {end_date:%d.%m.%Y}")
         else:
             start_date = st.date_input("Başlangıç tarihi", date(1981, 1, 1))
