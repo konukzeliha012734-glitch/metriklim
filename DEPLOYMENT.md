@@ -1,4 +1,4 @@
-# Metriklim'i internette yayımlama
+# Zetriklim'i internette yayımlama
 
 ## 1. GitHub
 

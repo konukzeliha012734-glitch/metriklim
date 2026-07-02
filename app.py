@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 import folium
+import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
@@ -22,6 +23,7 @@ from metriklim.artifacts import (
 )
 from metriklim.climate_engine import (
     connection_label,
+    fetch_map_tile as fetch_climate_engine_map_tile,
     fetch_timeseries as fetch_climate_engine_timeseries,
     validate_api_key,
 )
@@ -45,7 +47,7 @@ ROOT = Path(__file__).parent
 LOGO = ROOT / "assets" / "metriklim-logo-v2.png"
 
 st.set_page_config(
-    page_title="Metriklim | Coğrafi iklim analizi",
+    page_title="Zetriklim | Havza ve iklim analizi",
     page_icon="◉",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -53,7 +55,7 @@ st.set_page_config(
 
 access_code = os.getenv("METRIKLIM_ACCESS_CODE")
 if access_code and not st.session_state.get("access_granted"):
-    st.title("Metriklim")
+    st.title("Zetriklim")
     st.caption("Bu paylaşım GEE kotasını korumak için erişim koduyla sınırlandırılmıştır.")
     entered_code = st.text_input("Erişim kodu", type="password")
     if st.button("Uygulamaya gir", type="primary", use_container_width=True):
@@ -138,14 +140,22 @@ if "uploader_nonce" not in st.session_state:
 
 top_logo, top_hero = st.columns([0.16, 0.84], vertical_alignment="center")
 with top_logo:
-    st.image(str(LOGO), width=150)
+    st.markdown(
+        """
+        <div style="text-align:center;padding:1rem .4rem">
+          <div style="font-size:2.2rem;font-weight:900;color:#075b68;letter-spacing:.08em">Z</div>
+          <div style="font-size:1rem;font-weight:850;color:#063447;letter-spacing:.12em">ZETRİKLİM</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 with top_hero:
     st.markdown(
         """
         <section class="hero">
           <h1>Havzanı tanımla, iklim ve çevresel değişimi birlikte analiz et.</h1>
           <p>Çalışma alanını yükle; veri kaynağını, inceleme dönemini ve analiz yöntemlerini seç.
-          Metriklim sonuçlarını harita, GeoTIFF, Excel ve CBS'ye hazır proje paketi olarak oluştursun.</p>
+          Zetriklim sonuçlarını harita, GeoTIFF, Excel ve CBS'ye hazır proje paketi olarak oluştursun.</p>
         </section>
         """,
         unsafe_allow_html=True,
@@ -155,16 +165,16 @@ st.markdown(
     """
     <div class="workflow">
       <div class="flow-card"><b>1 · Alanı yükle</b><span>SHP, GeoPackage veya GeoJSON</span></div>
-      <div class="flow-card"><b>2 · Veriyi seç</b><span>CHIRPS, ERA5-Land ve açık kaynaklar</span></div>
-      <div class="flow-card"><b>3 · Analizi kur</b><span>SPI ölçeği, dönem ve yöntem</span></div>
+      <div class="flow-card"><b>2 · Analizi seç</b><span>SPI, NDVI, EVI veya LST</span></div>
+      <div class="flow-card"><b>3 · Veri kaynağını seç</b><span>Climate Engine veya Earth Engine</span></div>
       <div class="flow-card"><b>4 · CBS çıktısını al</b><span>Excel, GeoPackage, GeoTIFF ve harita</span></div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-tab_area, tab_data, tab_analysis, tab_output = st.tabs(
-    ["01 · Çalışma Alanı", "02 · Veri Kaynakları", "03 · Analiz Tasarımı", "04 · Bulgular ve Çıktılar"]
+tab_area, tab_analysis, tab_data, tab_output = st.tabs(
+    ["01 · Çalışma Alanı", "02 · Analiz Seçimi", "03 · Veri Kaynağı", "04 · Bulgular ve Çıktılar"]
 )
 
 with tab_area:
@@ -243,6 +253,7 @@ with tab_area:
                 "Mekânsal özetler",
                 ["Ortalama", "Toplam", "Minimum", "Maksimum", "Medyan", "Standart sapma", "Yüzdelikler"],
                 default=["Ortalama", "Minimum", "Maksimum"],
+                help="Çalışma alanındaki raster hücrelerinin hangi istatistiklerle özetleneceğini belirler.",
             )
         else:
             spatial_mode = "Tüm objeleri tek çalışma alanı olarak birleştir"
@@ -270,11 +281,13 @@ with tab_area:
             fmap = folium.Map([39.0, 35.0], zoom_start=5, tiles="CartoDB positron")
         st_folium(fmap, height=570, width="stretch", returned_objects=[])
 
+analysis_for_source = st.session_state.get("selected_analysis_widget", "SPI")
+
 with tab_data:
     st.markdown('<div class="step">Kaynak, ürün ve değişken</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="hint">Metriklim tek bir servise bağlı değildir. Climate Engine, '
-        'Copernicus, NASA, NOAA, ESA, USGS ve doğrudan açık veri ürünleri aynı iş akışında seçilebilir.</div>',
+        f'<div class="hint"><strong>{analysis_for_source}</strong> için yalnızca uyumlu kaynak ve '
+        'ürünler listelenir. Climate Engine varsayılandır; Earth Engine alternatif olarak seçilebilir.</div>',
         unsafe_allow_html=True,
     )
     c1, c2, c3 = st.columns(3, gap="large")
@@ -283,11 +296,15 @@ with tab_data:
         os.getenv("CLIMATE_ENGINE_API_KEY", ""),
     )
     with c1:
-        source_options = list(SOURCES)
+        source_options = ["Climate Engine", "Google Earth Engine"]
         provider = st.selectbox(
             "Veri kaynağı",
             source_options,
-            index=source_options.index("Google Earth Engine"),
+            index=0,
+            help=(
+                "Climate Engine kişisel API anahtarıyla, Google Earth Engine ise "
+                "Project ID ve Google hesabı yetkilendirmesiyle çalışır."
+            ),
         )
         source_info = SOURCES[provider]
         st.caption(source_info["description"])
@@ -461,42 +478,80 @@ with tab_data:
                 gee_ok, gee_message = False, "Project ID bekleniyor"
                 st.info("Önce kendi Google Cloud Project ID değerinizi girin.")
     with c2:
-        product = st.selectbox("Veri ürünü", source_info["products"])
-        ce_dataset_defaults = {
-            "CHIRPS Daily": ("CHIRPS_DAILY", "precipitation"),
-            "CHIRPS Pentad": ("CHIRPS_PENTAD", "precipitation"),
-            "ERA5": ("ERA5", ""),
-            "ERA5-Land": ("ERA5_LAND", ""),
+        ce_products = {
+            "SPI": {
+                "CHIRPS Daily (4,8 km)": ("CHIRPS_DAILY", ["precipitation"]),
+                "CHIRPS Pentad (4,8 km)": ("CHIRPS_PENTAD", ["precipitation"]),
+                "CHIRPS Preliminary Pentad": ("CHIRPS_PRELIM_PENTAD", ["precipitation"]),
+                "ERA5-Ag Daily (9,6 km)": ("ERA5_AG", ["total_precipitation"]),
+            },
+            "NDVI": {
+                "Sentinel-2 Surface Reflectance (10 m)": ("SENTINEL2_SR", ["NDVI"]),
+                "Harmonized Landsat–Sentinel-2 (30 m)": ("HLS_SR", ["NDVI"]),
+                "Landsat 5/7/8/9 Surface Reflectance (30 m)": ("LANDSAT_SR", ["NDVI"]),
+            },
+            "EVI": {
+                "Sentinel-2 Surface Reflectance (10 m)": ("SENTINEL2_SR", ["EVI"]),
+                "Harmonized Landsat–Sentinel-2 (30 m)": ("HLS_SR", ["EVI"]),
+                "Landsat 5/7/8/9 Surface Reflectance (30 m)": ("LANDSAT_SR", ["EVI"]),
+            },
+            "LST": {
+                "Landsat 8 Surface Reflectance (30 m)": ("LANDSAT8_SR", ["LST"]),
+                "Landsat 5/7/8/9 Surface Reflectance (30 m)": ("LANDSAT_SR", ["LST"]),
+                "MODIS Terra 8-day (1 km)": ("MODIS_TERRA_8DAY", ["LST_Day_1km"]),
+            },
+        }
+        gee_products = {
+            "SPI": ["CHIRPS Daily"],
+            "NDVI": ["Sentinel-2 SR Harmonized"],
+            "EVI": ["Sentinel-2 SR Harmonized"],
+            "LST": ["Landsat 8/9 Collection 2 Level-2"],
         }
         if provider == "Climate Engine":
-            default_dataset, default_variables = ce_dataset_defaults.get(product, (product, ""))
-            ce_dataset_id = st.text_input(
-                "Climate Engine dataset parametresi",
-                value=default_dataset,
-                help="Resmî Climate Engine Datasets & Variables sayfasındaki Dataset Parameter değeri.",
+            product = st.selectbox(
+                "Veri ürünü",
+                list(ce_products[analysis_for_source]),
+                help=f"Yalnızca {analysis_for_source} üretebilen doğrulanmış Climate Engine ürünleri gösterilir.",
             )
-            ce_variable_ids = st.text_input(
-                "Climate Engine değişken parametreleri",
-                value=default_variables,
-                placeholder="ör. precipitation veya NDVI, EVI",
-                help="Birden fazla değişkeni virgülle ayırabilirsiniz.",
+            dataset_options = {
+                value[0]: value[1]
+                for value in ce_products[analysis_for_source].values()
+            }
+            selected_dataset = ce_products[analysis_for_source][product][0]
+            ce_dataset_id = st.selectbox(
+                "Dataset parametresi",
+                list(dataset_options),
+                index=list(dataset_options).index(selected_dataset),
+                help="Climate Engine API'nin kullandığı resmî dataset kodudur.",
             )
+            ce_variable_id = st.selectbox(
+                "Değişken parametresi",
+                dataset_options[ce_dataset_id],
+                help=f"{analysis_for_source} hesabı için ürün içinde kullanılacak resmî değişken kodudur.",
+            )
+            ce_variable_ids = ce_variable_id
             st.link_button(
                 "Dataset ve değişken parametrelerini incele",
                 "https://www.climateengine.org/apis/apiDatasets/",
                 use_container_width=True,
             )
         else:
+            product = st.selectbox(
+                "Veri ürünü",
+                gee_products[analysis_for_source],
+                help=f"{analysis_for_source} için doğrulanmış Earth Engine koleksiyonu.",
+            )
             ce_dataset_id, ce_variable_ids = "", ""
-        variables = st.multiselect(
-            "Değişkenler",
-            list(VARIABLES),
-            default=["Yağış", "Hava sıcaklığı"],
-        )
-        quality_control = st.multiselect(
-            "Kalite kontrolleri",
-            ["Eksik veri", "Aykırı değer", "Birim dönüşümü", "Zaman sürekliliği", "Kaynaklar arası karşılaştırma"],
-            default=["Eksik veri", "Birim dönüşümü", "Zaman sürekliliği"],
+        variables = {
+            "SPI": ["Yağış"],
+            "NDVI": ["NDVI / EVI"],
+            "EVI": ["NDVI / EVI"],
+            "LST": ["Yüzey sıcaklığı (LST)"],
+        }[analysis_for_source]
+        quality_control = ["Eksik veri", "Birim dönüşümü", "Zaman sürekliliği"]
+        st.info(
+            f"Analiz değişkeni otomatik seçildi: {variables[0]}. "
+            "Eksik veri, birim ve zaman sürekliliği kontrolleri uygulanacaktır."
         )
     with c3:
         period_mode = st.radio(
@@ -513,6 +568,7 @@ with tab_data:
                 max_value=date.today().year,
                 value=1981,
                 step=1,
+                help="Analize dahil edilecek ilk takvim yılı.",
             )
             end_year = year_right.number_input(
                 "Bitiş yılı",
@@ -520,6 +576,7 @@ with tab_data:
                 max_value=date.today().year,
                 value=date.today().year,
                 step=1,
+                help="Analize dahil edilecek son takvim yılı; mevcut yıl seçilirse bugün sona erer.",
             )
             start_date = date(int(start_year), 1, 1)
             end_date = (
@@ -529,172 +586,102 @@ with tab_data:
             )
             st.caption(f"Uygulanacak dönem: {start_date:%d.%m.%Y} – {end_date:%d.%m.%Y}")
         else:
-            start_date = st.date_input("Başlangıç tarihi", date(1981, 1, 1))
-            end_date = st.date_input("Bitiş tarihi", date.today())
-        temporal_scale = st.selectbox(
-            "Zaman çözünürlüğü",
-            ["Saatlik", "3 saatlik", "6 saatlik", "Günlük", "Haftalık", "Aylık", "Mevsimlik", "Yıllık"],
-            index=3,
-        )
-        if temporal_scale in {"Saatlik", "3 saatlik", "6 saatlik"}:
-            start_time = st.time_input("Başlangıç saati", time(0, 0))
-            end_time = st.time_input("Bitiş saati", time(23, 0))
-        else:
-            start_time, end_time = None, None
-        aggregation = st.selectbox(
-            "Zamansal özet",
-            ["Kaynağın doğal değeri", "Ortalama", "Toplam", "Minimum", "Maksimum", "Medyan", "Yüzdelik"],
+            start_date = st.date_input(
+                "Başlangıç tarihi", date(1981, 1, 1),
+                help="Veri sorgusunun başlayacağı günü seçin.",
+            )
+            end_date = st.date_input(
+                "Bitiş tarihi", date.today(),
+                help="Veri sorgusunun sona ereceği günü seçin.",
+            )
+        temporal_scale = "Aylık" if analysis_for_source == "SPI" else "Dönem kompoziti"
+        aggregation = "Toplam" if analysis_for_source == "SPI" else "Medyan"
+        start_time, end_time = None, None
+        st.info(
+            f"Zamansal işlem otomatik belirlendi: {temporal_scale} · {aggregation}.",
+            icon="ℹ️",
         )
         if start_date > end_date:
             st.error("Başlangıç yılı/tarihi bitiş değerinden sonra olamaz.")
 
-    st.divider()
-    st.subheader("Ürün–değişken uygunluk denetimi")
-    rows = []
-    for variable in variables:
-        suggestions = VARIABLES[variable]
-        rows.append(
-            {
-                "Değişken": variable,
-                "Seçili ürün": product,
-                "Önerilen ürünler": ", ".join(suggestions),
-                "Kontrol": "Doğrudan uygun" if any(p in product or product in p for p in suggestions) else "Alternatif ürün önerilir",
-            }
-        )
-    st.dataframe(rows, width="stretch", hide_index=True)
+    st.success(
+        f"Uyumlu seçim: {analysis_for_source} · {provider} · {product}. "
+        "Dataset ve değişken kodları analizle birlikte metadata dosyasına kaydedilecektir."
+    )
 
 with tab_analysis:
-    st.markdown('<div class="step">Bilimsel yöntem seçimi ve analiz tasarımı</div>', unsafe_allow_html=True)
+    st.markdown('<div class="step">Uygulanacak analizi belirleyin</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="hint"><strong>Birden fazla modülü birlikte çalıştırabilirsiniz.</strong> '
-        'Örneğin SPI-3 + NDVI + LST + TWI seçimi, kuraklık sinyalini bitki, yüzey sıcaklığı '
-        've topoğrafik nem potansiyeliyle aynı pakette karşılaştırır.</div>',
+        '<div class="hint">Her işlemde tek bir ana analiz seçilir. Böylece yalnızca o yönteme '
+        'ait parametreler, uygun veri ürünleri ve çıktılar gösterilir.</div>',
         unsafe_allow_html=True,
     )
-    operational_methods = {
-        "SPI", "NDVI", "NDWI", "NDMI", "NDBI", "EVI", "SAVI",
-        "LST", "DEM", "SLOPE", "ASPECT", "TWI",
-    }
-    operational_families = [
-        "Kuraklık indisleri",
-        "Uzaktan algılama indisleri",
-        "Topoğrafik ve hidrolojik türevler",
-    ]
-    selected_families = st.multiselect(
-        "Analiz modülleri",
-        operational_families,
-        default=operational_families,
-        help="Yöntem listesini daraltmak için bir veya daha fazla bilimsel analiz ailesi seçin.",
+    selected_analysis = st.selectbox(
+        "Uygulanacak analiz",
+        ["SPI", "NDVI", "EVI", "LST"],
+        key="selected_analysis_widget",
+        help=(
+            "SPI meteorolojik kuraklığı; NDVI ve EVI bitki örtüsü durumunu; "
+            "LST arazi yüzey sıcaklığını inceler."
+        ),
     )
-    available_methods = list(
-        dict.fromkeys(
-            method
-            for family in selected_families
-            for method in ANALYSES[family]
-            if method in operational_methods
+    selected_analyses = [selected_analysis]
+    method_info = ANALYSIS_METHODS[selected_analysis]
+    st.dataframe(
+        [{
+            "Yöntem": selected_analysis,
+            "Tam ad": method_info["title"],
+            "Önerilen ürün": method_info["source"],
+            "Doğal çözünürlük": method_info["resolution"],
+            "Amaç": method_info["purpose"],
+        }],
+        hide_index=True,
+        width="stretch",
+    )
+    analysis_params = {"method": selected_analysis}
+
+    if selected_analysis == "SPI":
+        st.markdown("##### SPI hesaplama ayarları")
+        p1, p2, p3 = st.columns(3)
+        analysis_params["scales"] = p1.multiselect(
+            "SPI zaman ölçeği (ay)",
+            [1, 3, 6, 9, 12, 18, 24],
+            default=[3, 6, 12],
+            help=(
+                "Yağışın kaç aylık birikim üzerinden değerlendirileceğini belirler. "
+                "SPI-3 mevsimsel, SPI-6 orta dönem, SPI-12 uzun dönem kuraklığı gösterir."
+            ),
         )
-    )
-    selected_analyses = st.multiselect(
-        "Uygulanacak analizler",
-        available_methods,
-        default=["SPI"] if "SPI" in available_methods else [],
-        help="Her seçim çıktı paketine ayrı yöntem ve kaynak kaydıyla eklenir.",
-    )
-
-    documented_methods = [
-        {"Kod": method, **ANALYSIS_METHODS[method]}
-        for method in selected_analyses
-        if method in ANALYSIS_METHODS
-    ]
-    if documented_methods:
-        with st.expander("Seçilen yöntemlerin bilimsel kimliği", expanded=True):
-            st.dataframe(
-                [
-                    {
-                        "Yöntem": row["Kod"],
-                        "Tam ad": row["title"],
-                        "Birincil ürün": row["source"],
-                        "Doğal çözünürlük": row["resolution"],
-                        "Analitik amaç": row["purpose"],
-                    }
-                    for row in documented_methods
-                ],
-                width="stretch",
-                hide_index=True,
-            )
-
-    st.subheader("Ortak araştırma ayarları")
-    a1, a2, a3, a4 = st.columns(4)
-    with a1:
-        baseline = st.selectbox("Referans dönem", ["1991–2020", "1981–2010", "1961–1990", "Tüm dönem", "Özel"])
-    with a2:
-        significance = st.selectbox("Anlamlılık düzeyi (α)", ["0.05", "0.01", "0.10"])
-    with a3:
-        missing_method = st.selectbox("Eksik veri yaklaşımı", ["Analiz dışı bırak", "Doğrusal enterpolasyon", "Komşu dönem ortalaması"])
-    with a4:
-        seasonal_filter = st.multiselect("Ay/mevsim filtresi", ["İlkbahar", "Yaz", "Sonbahar", "Kış"], placeholder="Tümü")
-
-    analysis_params = {
-        "families": selected_families,
-        "baseline": baseline,
-        "significance": significance,
-        "missing_method": missing_method,
-        "seasonal_filter": seasonal_filter,
-    }
-
-    if any(method in selected_analyses for method in ANALYSES["Kuraklık indisleri"]):
-        st.markdown("##### Kuraklık analizi parametreleri")
-        p1, p2, p3 = st.columns(3)
-        with p1:
-            analysis_params["scales"] = st.multiselect("İndeks ölçeği (ay)", [1, 2, 3, 6, 9, 12, 18, 24, 36, 48], default=[1, 3, 6, 12])
-        with p2:
-            analysis_params["distribution"] = st.selectbox("Olasılık dağılımı", ["Gamma", "Pearson Tip III", "Log-lojistik", "Otomatik en iyi uyum"])
-        with p3:
-            analysis_params["pet_method"] = st.selectbox("PET yöntemi (SPEI/PDSI)", ["FAO-56 Penman–Monteith", "Hargreaves", "Thornthwaite"])
-    if any(method in selected_analyses for method in ANALYSES["Uzaktan algılama indisleri"]):
-        st.markdown("##### Uydu görüntüsü ve kompozit parametreleri")
-        p1, p2, p3 = st.columns(3)
+        analysis_params["distribution"] = p2.selectbox(
+            "Olasılık dağılımı",
+            ["Gamma"],
+            help="Yağış serisi için sıfır olasılığı düzeltilmiş Gamma dağılımı uygulanır.",
+        )
+        analysis_params["baseline"] = p3.selectbox(
+            "Referans dönemi",
+            ["1981–2024", "1991–2020", "1981–2010"],
+            help="SPI değerlerinin karşılaştırıldığı klimatolojik dönemdir.",
+        )
+    else:
+        st.markdown(f"##### {selected_analysis} görüntü işleme ayarları")
+        p1, p2 = st.columns(2)
         analysis_params["cloud_limit"] = p1.slider(
-            "Azami sahne bulutluluğu (%)", 0, 80, 30, 5
+            "Azami sahne bulutluluğu (%)",
+            0, 80, 30, 5,
+            help="Bu orandan daha bulutlu uydu sahneleri analize alınmaz.",
         )
         analysis_params["composite"] = p2.selectbox(
-            "Dönem kompoziti", ["Medyan"], help="Medyan kompozit artık bulut ve uç değer etkisini azaltır."
+            "Dönem kompoziti",
+            ["Medyan"],
+            help="Seçilen dönemdeki geçerli piksellerin medyanı alınarak tek raster üretilir.",
         )
-        analysis_params["savi_l"] = p3.number_input(
-            "SAVI toprak düzeltme katsayısı (L)", 0.0, 1.0, 0.5, 0.1,
-            help="Mevcut hesap motorunda standart L=0,5 uygulanır.",
+        st.info(
+            {
+                "NDVI": "−1 ile +1 arasındadır; yüksek pozitif değerler daha yoğun ve sağlıklı bitki örtüsünü gösterir.",
+                "EVI": "Yoğun bitki örtüsünde atmosfer ve toprak etkisini NDVI'ya göre daha güçlü düzeltir.",
+                "LST": "Uydu termal bantlarından hesaplanan arazi yüzey sıcaklığıdır; hava sıcaklığı değildir.",
+            }[selected_analysis]
         )
-        st.caption(
-            "NDVI/NDWI/EVI/SAVI 10 m; NDMI/NDBI 20 m Sentinel-2 L2A. "
-            "LST, Landsat 8/9 Collection 2 Level-2 yüzey sıcaklığıdır."
-        )
-
-    if "Eğilim ve homojenlik" in selected_families:
-        p1, p2 = st.columns(2)
-        analysis_params["autocorrelation"] = p1.selectbox("Seri bağımlılığı", ["Ön beyazlatma", "Trend-free pre-whitening", "Düzeltme yok"])
-        analysis_params["trend_unit"] = p2.selectbox("Eğim raporlama birimi", ["Yıl başına", "10 yıl başına", "Tüm dönem"])
-    if "İklim uçları (ETCCDI)" in selected_families:
-        p1, p2 = st.columns(2)
-        analysis_params["percentile_period"] = p1.selectbox("Yüzdelik referansı", ["1991–2020", "1981–2010", "Özel"])
-        analysis_params["wet_day_threshold"] = p2.number_input("Islak gün eşiği (mm)", 0.1, 20.0, 1.0, 0.1)
-    if "Mekânsal istatistik" in selected_families:
-        p1, p2, p3 = st.columns(3)
-        analysis_params["resolution"] = p1.number_input("Çıktı pikseli (m)", 10, 100000, 1000, 10)
-        analysis_params["neighbors"] = p2.selectbox("Komşuluk", ["Queen", "Rook", "Mesafe bandı", "K-en yakın"])
-        analysis_params["interpolation"] = p3.selectbox("Enterpolasyon ayarı", ["Otomatik", "Doğal komşu", "Varyogram ile"])
-    if "Föhn ve topoğrafya" in selected_families:
-        p1, p2, p3 = st.columns(3)
-        analysis_params["ridge_direction"] = p1.number_input("Sırt doğrultusu (°)", 0, 359, 90)
-        analysis_params["temp_threshold"] = p2.number_input("Sıcaklık farkı eşiği (°C)", 0.0, 20.0, 2.0, 0.5)
-        analysis_params["rh_threshold"] = p3.number_input("Nem farkı eşiği (%)", 0, 100, 10)
-
-    st.info(
-        f"{len(selected_families)} modülden {len(selected_analyses)} analiz seçildi. "
-        "Her raster çalışma alanı sınırına kırpılacak; kaynak, formül, dönem ve çözünürlük metadata dosyasına yazılacaktır."
-    )
-    st.success(
-        "Bu ekrandaki 12 yöntem çalışır durumdadır; yalnızca gerçek açık veri koleksiyonları kullanılır."
-    )
 
 with tab_output:
     st.markdown('<div class="step">İşlemi oluştur ve indir</div>', unsafe_allow_html=True)
@@ -705,33 +692,61 @@ with tab_output:
           İndir düğmesine bastığınızda dosya tarayıcınızın varsayılan
           <strong>İndirilenler (Downloads)</strong> klasörüne kaydedilir.
           Tarayıcınız “Her indirmede konum sor” ayarındaysa hedef klasörü siz seçersiniz.
-          Metriklim dosyayı sunucuda kalıcı olarak saklamaz.
+          Zetriklim dosyayı sunucuda kalıcı olarak saklamaz.
         </div>
         """,
         unsafe_allow_html=True,
     )
     summary = st.session_state.get("geometry_summary")
+    current_output_config = (
+        selected_analysis,
+        provider,
+        product,
+        str(start_date),
+        str(end_date),
+        round(summary.area_km2, 4) if summary else None,
+    )
+    if (
+        st.session_state.get("output_config")
+        and st.session_state.output_config != current_output_config
+    ):
+        for state_key in [
+            "output_files", "output_package", "output_metadata", "output_data",
+            "output_source", "output_analysis_errors", "output_tile_url",
+        ]:
+            st.session_state.pop(state_key, None)
     q1, q2, q3, q4 = st.columns(4)
     q1.metric("Alan", f"{summary.area_km2:,.2f} km²" if summary else "Bekleniyor")
     q2.metric("Kaynak", provider)
     q3.metric("Değişken", len(variables))
     q4.metric("Yöntem", len(selected_analyses))
 
+    output_options = [
+        "Proje paketi (ZIP)", "CSV zaman serisi", "Excel çalışma kitabı",
+        "GeoPackage", "GeoJSON", "PNG harita",
+    ]
+    if provider == "Google Earth Engine":
+        output_options.insert(3, "GeoTIFF raster")
+    else:
+        output_options.append("Etkileşimli HTML harita")
     output_formats = st.multiselect(
         "İstenen çıktılar",
-        ["Proje paketi (ZIP)", "CSV zaman serisi", "Excel çalışma kitabı", "GeoTIFF raster", "GeoPackage", "GeoJSON", "PNG harita", "PDF rapor"],
-        default=["Proje paketi (ZIP)", "CSV zaman serisi", "Excel çalışma kitabı", "GeoPackage", "GeoJSON", "PNG harita"],
+        output_options,
+        default=output_options,
+        help="Yalnızca seçilen kaynağın gerçekten üretebildiği çıktı türleri listelenir.",
+        key=f"output_formats_{provider}",
     )
     include_items = st.multiselect(
         "Pakete eklenecek içerik",
         ["Ham veri", "İşlenmiş veri", "Analiz sonuçları", "Grafikler", "Kaynak ve yöntem metadata", "Kalite kontrol raporu"],
         default=["Analiz sonuçları", "Kaynak ve yöntem metadata", "Kalite kontrol raporu"],
+        help="ZIP proje paketinin içinde bulunmasını istediğiniz içerikleri seçin.",
     )
 
     source_ready = (
         bool(climate_engine_key and ce_dataset_id and ce_variable_ids)
         if provider == "Climate Engine"
-        else True
+        else bool(gee_ok and gee_project)
     )
     can_build = bool(
         summary and variables and selected_analyses and start_date <= end_date and source_ready
@@ -744,6 +759,10 @@ with tab_output:
         st.warning(
             "Climate Engine işlemi için doğrulanmış API anahtarı, dataset parametresi "
             "ve en az bir değişken parametresi gereklidir."
+        )
+    if provider == "Google Earth Engine" and not source_ready:
+        st.warning(
+            "Earth Engine işlemi için Project ID ve tamamlanmış Google yetkilendirmesi gereklidir."
         )
 
     if st.button(
@@ -769,47 +788,36 @@ with tab_output:
             try:
                 with st.spinner("Seçilen kaynaktan gerçek veri indiriliyor ve çıktılar hazırlanıyor..."):
                     if provider == "Google Earth Engine":
-                        if "SPI" in selected_analyses and "Yağış" not in variables:
-                            raise ValueError(
-                                "Google Earth Engine/CHIRPS akışında SPI için Yağış değişkenini seçin."
-                            )
-                        climate_data, unsupported = fetch_gee_monthly_climate(
-                            summary.gdf_wgs84,
-                            start_date,
-                            end_date,
-                            variables,
-                            project=gee_project,
-                        )
-                        climate_model = "CHIRPS Daily + ERA5-Land via Google Earth Engine"
-                        climate_url = (
-                            "https://developers.google.com/earth-engine/datasets/catalog/"
-                            "UCSB-CHG_CHIRPS_DAILY"
-                        )
                         climate_latitude, climate_longitude = summary.centroid
                         climate_elevation = None
-                        if unsupported:
-                            try:
-                                fallback = fetch_centroid_series(
-                                    latitude=summary.centroid[0],
-                                    longitude=summary.centroid[1],
-                                    start_date=start_date,
-                                    end_date=end_date,
-                                    variables=unsupported,
-                                    temporal_scale="Aylık",
-                                )
-                                fallback_columns = [
-                                    column for column in fallback.data.columns
-                                    if column not in {"Örnek ID", "Enlem", "Boylam"}
-                                ]
-                                climate_data = climate_data.merge(
-                                    fallback.data[fallback_columns],
-                                    on="Tarih",
-                                    how="outer",
-                                )
-                                unsupported = fallback.unsupported_variables
-                                climate_model += " + ERA5 fallback (Open-Meteo)"
-                            except ValueError:
-                                pass
+                        unsupported = []
+                        if selected_analysis == "SPI":
+                            climate_data, unsupported = fetch_gee_monthly_climate(
+                                summary.gdf_wgs84,
+                                start_date,
+                                end_date,
+                                ["Yağış"],
+                                project=gee_project,
+                            )
+                            climate_model = "CHIRPS Daily via Google Earth Engine"
+                            climate_url = (
+                                "https://developers.google.com/earth-engine/datasets/catalog/"
+                                "UCSB-CHG_CHIRPS_DAILY"
+                            )
+                        else:
+                            climate_data = pd.DataFrame(
+                                [{
+                                    "Tarih": pd.Timestamp(end_date),
+                                    "Örnek ID": 1,
+                                    "Enlem": climate_latitude,
+                                    "Boylam": climate_longitude,
+                                    "Analiz": selected_analysis,
+                                    "Dönem başlangıcı": str(start_date),
+                                    "Dönem bitişi": str(end_date),
+                                }]
+                            )
+                            climate_model = f"{product} via Google Earth Engine"
+                            climate_url = "https://developers.google.com/earth-engine/datasets/catalog"
                     elif provider == "Climate Engine":
                         climate_data, ce_metadata = fetch_climate_engine_timeseries(
                             climate_engine_key,
@@ -957,35 +965,88 @@ with tab_output:
                     map_png = build_area_map_png(summary.gdf_wgs84, summary.centroid)
                     gpkg = geodata_to_gpkg(summary.gdf_wgs84, summary.centroid)
                     readme = (
-                        "METRİKLİM GERÇEK VERİ PAKETİ\n\n"
+                        "ZETRİKLİM GERÇEK VERİ VE ANALİZ PAKETİ\n\n"
                         f"Kaynak: {climate_model}\n"
                         f"Dönem: {start_date} – {end_date}\n"
                         f"Kayıt sayısı: {len(climate_data):,}\n"
                         f"Örnekleme: {'Havza alan ortalaması' if provider == 'Google Earth Engine' else 'Çalışma alanının merkezindeki ERA5-Land grid hücresi'}.\n\n"
                         "DOSYALAR\n"
-                        "- metriklim-iklim-verisi.xlsx: veri, kaynak, alan ve özet sayfaları\n"
-                        "- metriklim-iklim-verisi.csv: CBS ve istatistik yazılımları için tablo\n"
-                        "- metriklim-cbs.gpkg: çalışma alanı ve örnekleme noktası\n"
+                        "- zetriklim-veri.xlsx: veri, kaynak, alan ve özet sayfaları\n"
+                        "- zetriklim-veri.csv: CBS ve istatistik yazılımları için tablo\n"
+                        "- zetriklim-cbs.gpkg: çalışma alanı ve örnekleme noktası\n"
                         "- calisma-alani.geojson: çalışma alanı sınırı\n"
                         "- zaman-serisi.png: iklim grafiği\n"
                         "- calisma-alani-haritasi.png: çalışma alanı / havza sınırı\n"
                         "- [YONTEM]_[DONEM].tif: havza sınırına kırpılmış CBS raster katmanı\n"
                         "- [YONTEM]_[DONEM].png: lejantlı akademik harita önizlemesi\n"
                         "- raster-analiz-metadata.json: raster kaynağı, formül, dönem, çözünürlük ve sahne sayısı\n"
-                        "- metriklim-metadata.json: veri kaynağı ve işlem izi\n"
+                        "- zetriklim-metadata.json: veri kaynağı ve işlem izi\n"
                     ).encode("utf-8")
                     files = {
-                        "metriklim-iklim-verisi.xlsx": excel,
-                        "metriklim-iklim-verisi.csv": csv_data,
-                        "metriklim-cbs.gpkg": gpkg,
+                        "zetriklim-veri.xlsx": excel,
+                        "zetriklim-veri.csv": csv_data,
+                        "zetriklim-cbs.gpkg": gpkg,
                         "calisma-alani.geojson": area_geojson,
                         "zaman-serisi.png": graph_png,
                         "calisma-alani-haritasi.png": map_png,
-                        "metriklim-metadata.json": metadata,
+                        "zetriklim-metadata.json": metadata,
                         "BENI-OKU.txt": readme,
                     }
-                    gee_ok, _ = cached_gee_status(gee_project or None)
-                    if gee_ok:
+                    remote_errors = []
+                    climate_engine_tile_url = None
+                    if provider == "Climate Engine":
+                        try:
+                            (
+                                climate_engine_tile_url,
+                                ce_map_metadata,
+                            ) = fetch_climate_engine_map_tile(
+                                climate_engine_key,
+                                summary.gdf_wgs84,
+                                start_date,
+                                end_date,
+                                ce_dataset_id,
+                                ce_variable_ids,
+                                selected_analysis,
+                            )
+                            ce_map = folium.Map(summary.centroid, zoom_start=8, tiles="CartoDB positron")
+                            folium.TileLayer(
+                                tiles=climate_engine_tile_url,
+                                attr="Climate Engine / Google Earth Engine",
+                                name=f"{selected_analysis} · {ce_dataset_id}",
+                                overlay=True,
+                                control=True,
+                                opacity=0.85,
+                            ).add_to(ce_map)
+                            folium.GeoJson(
+                                summary.gdf_wgs84.__geo_interface__,
+                                name="Çalışma alanı",
+                                style_function=lambda _: {
+                                    "color": "#052f42",
+                                    "weight": 3,
+                                    "fillOpacity": 0,
+                                },
+                            ).add_to(ce_map)
+                            bounds = summary.bounds
+                            ce_map.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
+                            folium.LayerControl().add_to(ce_map)
+                            files[
+                                f"{selected_analysis}_ClimateEngine_etkilesimli_harita.html"
+                            ] = ce_map.get_root().render().encode("utf-8")
+                            files["climate-engine-harita-metadata.json"] = json.dumps(
+                                ce_map_metadata,
+                                ensure_ascii=False,
+                                indent=2,
+                                default=str,
+                            ).encode("utf-8")
+                        except Exception as map_error:
+                            remote_errors.append(
+                                f"{selected_analysis} Climate Engine haritası: {map_error}"
+                            )
+
+                    gee_ok = False
+                    if provider == "Google Earth Engine":
+                        gee_ok, _ = cached_gee_status(gee_project or None)
+                    if provider == "Google Earth Engine" and gee_ok:
                         if "Yağış" in variables:
                             precipitation_tif = build_climate_geotiff(
                                 summary.gdf_wgs84,
@@ -1030,7 +1091,6 @@ with tab_output:
                         method for method in selected_analyses if method in remote_methods
                     ]
                     remote_metadata = []
-                    remote_errors = []
                     raster_styles = {
                         "NDVI": ("YlGn", "NDVI", (-1.0, 1.0)),
                         "NDWI": ("Blues", "NDWI", (-1.0, 1.0)),
@@ -1044,7 +1104,9 @@ with tab_output:
                         "ASPECT": ("hsv", "Bakı (°)", (0.0, 360.0)),
                         "TWI": ("viridis", "TWI", None),
                     }
-                    for method in remote_selected:
+                    for method in (
+                        remote_selected if provider == "Google Earth Engine" else []
+                    ):
                         try:
                             raster_tif, method_metadata = build_remote_analysis_geotiff(
                                 summary.gdf_wgs84,
@@ -1085,8 +1147,7 @@ with tab_output:
                         ).encode("utf-8")
                     if spi_table is not None:
                         files["spi-sonuclari.csv"] = dataframe_to_csv(spi_table)
-                        gee_ok, _ = cached_gee_status(gee_project or None)
-                        if gee_ok:
+                        if provider == "Google Earth Engine" and gee_ok:
                             for selected_scale in (analysis_params.get("scales") or [3]):
                                 selected_scale = int(selected_scale)
                                 spi_tif = build_chirps_spi_geotiff(
@@ -1107,10 +1168,19 @@ with tab_output:
                     st.session_state.output_data = climate_data
                     st.session_state.output_source = climate_model
                     st.session_state.output_analysis_errors = remote_errors
-                st.success(
-                    f"Gerçek iklim verisi indirildi: {len(climate_data):,} kayıt. "
-                    "Excel, CSV, grafik, harita ve CBS paketi hazır."
-                )
+                    st.session_state.output_tile_url = climate_engine_tile_url
+                    st.session_state.output_boundary = summary.gdf_wgs84.to_json()
+                    st.session_state.output_config = current_output_config
+                if st.session_state.get("output_analysis_errors"):
+                    st.warning(
+                        f"Tablo verisi hazırlandı ({len(climate_data):,} kayıt), ancak seçilen "
+                        "analizin bütün görsel çıktıları tamamlanamadı."
+                    )
+                else:
+                    st.success(
+                        f"{selected_analysis} analizi tamamlandı: {len(climate_data):,} kayıt. "
+                        "Tablolar, haritalar ve CBS paketi hazır."
+                    )
                 if unsupported:
                     st.warning(
                         "Bu bağlayıcıda desteklenmeyen değişkenler pakete eklenmedi: "
@@ -1137,29 +1207,29 @@ with tab_output:
         d1.download_button(
             "Tüm paketi indir (ZIP)",
             st.session_state.output_package,
-            file_name="metriklim-gercek-veri-paketi.zip",
+            file_name="zetriklim-analiz-paketi.zip",
             mime="application/zip",
             use_container_width=True,
         )
         d2.download_button(
             "Excel indir",
-            st.session_state.output_files["metriklim-iklim-verisi.xlsx"],
-            file_name="metriklim-iklim-verisi.xlsx",
+            st.session_state.output_files["zetriklim-veri.xlsx"],
+            file_name="zetriklim-veri.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
         d3.download_button(
             "CSV indir",
-            st.session_state.output_files["metriklim-iklim-verisi.csv"],
-            file_name="metriklim-iklim-verisi.csv",
+            st.session_state.output_files["zetriklim-veri.csv"],
+            file_name="zetriklim-veri.csv",
             mime="text/csv",
             use_container_width=True,
         )
         cbs1, cbs2, cbs3 = st.columns(3)
         cbs1.download_button(
             "GeoPackage indir",
-            st.session_state.output_files["metriklim-cbs.gpkg"],
-            file_name="metriklim-cbs.gpkg",
+            st.session_state.output_files["zetriklim-cbs.gpkg"],
+            file_name="zetriklim-cbs.gpkg",
             mime="application/geopackage+sqlite3",
             use_container_width=True,
         )
@@ -1175,6 +1245,21 @@ with tab_output:
             st.session_state.output_files["calisma-alani-haritasi.png"],
             file_name="calisma-alani-haritasi.png",
             mime="image/png",
+            use_container_width=True,
+        )
+        extra1, extra2 = st.columns(2)
+        extra1.download_button(
+            "GeoJSON sınırını indir",
+            st.session_state.output_files["calisma-alani.geojson"],
+            file_name="calisma-alani.geojson",
+            mime="application/geo+json",
+            use_container_width=True,
+        )
+        extra2.download_button(
+            "Metadata indir",
+            st.session_state.output_files["zetriklim-metadata.json"],
+            file_name="zetriklim-metadata.json",
+            mime="application/json",
             use_container_width=True,
         )
         raster_names = [name for name in st.session_state.output_files if name.lower().endswith(".tif")]
@@ -1197,6 +1282,46 @@ with tab_output:
                     use_container_width=True,
                     key=f"raster_download_{index}_{raster_name}",
                 )
+        html_map_names = [
+            name for name in st.session_state.output_files
+            if name.lower().endswith(".html")
+        ]
+        if html_map_names:
+            st.subheader("Etkileşimli analiz haritası")
+            tile_url = st.session_state.get("output_tile_url")
+            if tile_url and summary:
+                result_map = folium.Map(
+                    summary.centroid,
+                    zoom_start=8,
+                    tiles="CartoDB positron",
+                )
+                folium.TileLayer(
+                    tiles=tile_url,
+                    attr="Climate Engine / Google Earth Engine",
+                    name=selected_analysis,
+                    overlay=True,
+                    opacity=0.85,
+                ).add_to(result_map)
+                folium.GeoJson(
+                    summary.gdf_wgs84.__geo_interface__,
+                    style_function=lambda _: {
+                        "color": "#052f42",
+                        "weight": 3,
+                        "fillOpacity": 0,
+                    },
+                ).add_to(result_map)
+                bounds = summary.bounds
+                result_map.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
+                st_folium(result_map, height=560, width="stretch", returned_objects=[])
+            for index, map_name in enumerate(html_map_names):
+                st.download_button(
+                    "Etkileşimli haritayı indir",
+                    st.session_state.output_files[map_name],
+                    file_name=map_name,
+                    mime="text/html",
+                    use_container_width=True,
+                    key=f"html_map_{index}",
+                )
         preview_names = [
             name
             for name in st.session_state.output_files
@@ -1215,4 +1340,17 @@ with tab_output:
         with st.expander("İndirilecek veriyi önizle", expanded=True):
             st.dataframe(st.session_state.output_data.head(500), width="stretch", hide_index=True)
             st.caption("Önizleme ilk 500 kaydı gösterir; indirilen Excel ve CSV tüm kayıtları içerir.")
+
+st.markdown(
+    """
+    <div style="
+      margin-top:3rem;padding:1.25rem 1.5rem;border-top:1px solid rgba(0,128,136,.22);
+      text-align:center;color:#496b73;background:rgba(255,255,255,.45);border-radius:18px 18px 0 0">
+      <strong style="color:#075b68;letter-spacing:.08em">ZETRİKLİM</strong><br>
+      Havza, iklim ve uzaktan algılama analiz platformu<br>
+      <span style="font-size:.82rem">Geliştiren: Zeliha Konuk · Tez araştırması prototipi · 2026</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 

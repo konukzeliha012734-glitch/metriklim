@@ -11,5 +11,5 @@ if not exist ".venv\Scripts\python.exe" (
 
 echo.
 echo Kurulum tamamlandi.
-echo Metriklim-Baslat.bat dosyasina cift tiklayarak uygulamayi acabilirsiniz.
+echo Zetriklim-Baslat.bat dosyasina cift tiklayarak uygulamayi acabilirsiniz.
 pause

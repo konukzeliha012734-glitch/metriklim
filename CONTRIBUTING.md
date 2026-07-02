@@ -1,6 +1,6 @@
-# Metriklim'e katkı
+# Zetriklim'e katkı
 
-Metriklim açık kaynaklı ve yeniden üretilebilir havza iklim analizi için
+Zetriklim açık kaynaklı ve yeniden üretilebilir havza iklim analizi için
 geliştirilir.
 
 ## Geliştirme ilkeleri

@@ -1,6 +1,6 @@
-# Metriklim
+# Zetriklim
 
-Metriklim; kullanıcı tanımlı havza, il, ilçe veya bölge sınırlarında
+Zetriklim; kullanıcı tanımlı havza, il, ilçe veya bölge sınırlarında
 doğrulanabilir iklim verisi, kuraklık, uzaktan algılama ve topoğrafya analizi üreten açık kaynaklı
 bir uygulamadır. Sabit yüzölçümü sınırı yoktur.
 
@@ -25,7 +25,7 @@ bir uygulamadır. Sabit yüzölçümü sınırı yoktur.
 
 ## Çalıştırma
 
-Windows'ta önce `Kurulum-Windows.bat`, ardından `Metriklim-Baslat.bat`
+Windows'ta önce `Kurulum-Windows.bat`, ardından `Zetriklim-Baslat.bat`
 dosyasına çift tıklayabilirsiniz.
 
 PowerShell ile:
@@ -37,7 +37,7 @@ streamlit run app.py
 
 Uygulama varsayılan olarak `http://localhost:8501` adresinde açılır.
 
-Kurulum tamamlandıktan sonra `Metriklim-Baslat.bat` dosyasına çift tıklayarak da
+Kurulum tamamlandıktan sonra `Zetriklim-Baslat.bat` dosyasına çift tıklayarak da
 uygulamayı başlatabilirsiniz.
 
 ## Climate Engine bağlantısı
@@ -81,4 +81,4 @@ belirtir. Kaynaklar sessizce veya kayıtsız biçimde birleştirilmez.
 
 ## Lisans
 
-Metriklim [MIT Lisansı](LICENSE) ile yayımlanır.
+Zetriklim [MIT Lisansı](LICENSE) ile yayımlanır.
