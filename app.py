@@ -883,8 +883,10 @@ with tab_output:
                             if "yağış" in column.lower() and spi_input_data[column].dtype.kind in "fi"
                         ]
                         if not precipitation_columns:
+                            available_columns = ", ".join(map(str, spi_input_data.columns))
                             raise ValueError(
-                                "SPI hesaplanamadı: veri tablosunda sayısal yağış sütunu bulunamadı."
+                                "SPI hesaplanamadı: veri tablosunda sayısal yağış sütunu bulunamadı. "
+                                f"Mevcut sütunlar: {available_columns}"
                             )
                         spi_scales = analysis_params.get("scales") or [1, 3, 6, 12]
                         spi_table = calculate_spi_table(

@@ -171,12 +171,44 @@ def fetch_timeseries(
         data["Tarih"] = pd.to_datetime(data["Tarih"], errors="coerce")
     else:
         raise ValueError("Climate Engine yanıtında tarih alanı bulunamadı.")
+
+    identifier_columns = {
+        "Tarih", "Date", "date", "time", "Time", "system:index",
+        "latitude", "longitude", "lat", "lon", "name", "id",
+    }
+    for column in data.columns:
+        if column not in identifier_columns:
+            converted = pd.to_numeric(data[column], errors="coerce")
+            if converted.notna().any():
+                data[column] = converted
+
     centroid = wgs84.dissolve().geometry.iloc[0].centroid
     data.insert(1, "Örnek ID", 1)
     data.insert(2, "Enlem", float(centroid.y))
     data.insert(3, "Boylam", float(centroid.x))
-    if "precipitation" in data.columns:
-        data = data.rename(columns={"precipitation": "Toplam yağış (mm)"})
+    requested_variables = {
+        item.strip().lower() for item in variables.split(",") if item.strip()
+    }
+    rain_candidates = [
+        column
+        for column in data.columns
+        if (
+            "precip" in str(column).lower()
+            or str(column).lower() in {"pr", "ppt", "rain", "rainfall"}
+        )
+        and pd.api.types.is_numeric_dtype(data[column])
+    ]
+    if requested_variables & {"precipitation", "pr", "ppt", "rain", "rainfall"}:
+        if not rain_candidates:
+            value_candidates = [
+                column
+                for column in data.select_dtypes(include="number").columns
+                if column not in {"Örnek ID", "Enlem", "Boylam"}
+            ]
+            if len(value_candidates) == 1:
+                rain_candidates = value_candidates
+        if rain_candidates:
+            data = data.rename(columns={rain_candidates[0]: "Toplam yağış (mm)"})
     metadata = {
         "endpoint": endpoint,
         "dataset": dataset,
